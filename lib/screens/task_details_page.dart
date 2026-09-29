@@ -79,19 +79,25 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
         status,
       );
 
-      final raw = result['task'];
+      final raw = result['assignment'] ?? result['task'] ?? result['data'];
 
       if (raw is Map) {
         _task = Map<String, dynamic>.from(raw);
-      } else if (_task != null) {
-        _task!['status'] = status;
+      }
+
+      _task ??= <String, dynamic>{};
+      _task!['status'] = status;
+
+      final nestedTask = _task!['task'];
+      if (nestedTask is Map) {
+        nestedTask['status'] = status;
       }
 
       if (mounted) {
+        setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Task status updated to $status')),
         );
-        setState(() {});
       }
     } catch (error) {
       if (mounted) {
@@ -106,13 +112,18 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
   }
 
   Map<String, dynamic> _taskData() {
+    final result = <String, dynamic>{};
     final nested = _task?['task'];
 
     if (nested is Map) {
-      return Map<String, dynamic>.from(nested);
+      result.addAll(Map<String, dynamic>.from(nested));
     }
 
-    return _task ?? <String, dynamic>{};
+    if (_task != null) {
+      result.addAll(_task!);
+    }
+
+    return result;
   }
 
   String _value(String key, [String fallback = '']) {

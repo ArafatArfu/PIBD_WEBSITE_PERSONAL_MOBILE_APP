@@ -64,9 +64,49 @@ class _TaskPageState extends State<TaskPage> {
           .toList();
 
       _tasks.sort((a, b) {
-        final aDate = _date(a).millisecondsSinceEpoch;
-        final bDate = _date(b).millisecondsSinceEpoch;
-        return aDate.compareTo(bDate);
+        final aTask = a['task'] is Map
+            ? Map<String, dynamic>.from(a['task'])
+            : a;
+
+        final bTask = b['task'] is Map
+            ? Map<String, dynamic>.from(b['task'])
+            : b;
+
+        final aDate =
+            DateTime.tryParse(
+              (a['updated_at'] ??
+                      aTask['updated_at'] ??
+                      a['created_at'] ??
+                      aTask['created_at'] ??
+                      '')
+                  .toString(),
+            ) ??
+            DateTime(1900);
+
+        final bDate =
+            DateTime.tryParse(
+              (b['updated_at'] ??
+                      bTask['updated_at'] ??
+                      b['created_at'] ??
+                      bTask['created_at'] ??
+                      '')
+                  .toString(),
+            ) ??
+            DateTime(1900);
+
+        final dateResult = bDate.compareTo(aDate);
+
+        if (dateResult != 0) {
+          return dateResult;
+        }
+
+        final aId =
+            int.tryParse((a['assignment_id'] ?? a['id'] ?? 0).toString()) ?? 0;
+
+        final bId =
+            int.tryParse((b['assignment_id'] ?? b['id'] ?? 0).toString()) ?? 0;
+
+        return bId.compareTo(aId);
       });
     } catch (error) {
       _error = error.toString().replaceFirst('Exception: ', '');
@@ -251,7 +291,7 @@ class _TaskPageState extends State<TaskPage> {
     final title = taskData['title']?.toString().trim().isNotEmpty == true
         ? taskData['title'].toString()
         : 'Untitled Task';
-    final priority = _text(task, 'priority', 'Normal');
+    final priority = _text(taskData, 'priority', 'Normal');
     final status = _text(task, 'status', 'Pending');
 
     return Padding(
