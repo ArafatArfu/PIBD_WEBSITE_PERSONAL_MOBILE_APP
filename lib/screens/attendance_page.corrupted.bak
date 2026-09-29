@@ -1,0 +1,815 @@
+﻿```dart
+import 'package:flutter/material.dart';
+import '../services/api_service.dart';
+
+class AttendancePage extends StatefulWidget {
+  const AttendancePage({super.key});
+
+  @override
+  State<AttendancePage> createState() => _AttendancePageState();
+}
+
+class _AttendancePageState extends State<AttendancePage> {
+  final apiService = ApiService();
+
+  bool loading = true;
+  bool submitting = false;
+  String? errorMessage;
+
+  List<dynamic> attendance = [];
+  Map<String, dynamic> today = {};
+  String monthLabel = '';
+
+  @override
+  void initState() {
+    super.initState();
+    loadAttendance();
+  }
+
+  Future<void> loadAttendance() async {
+    setState(() {
+      loading = true;
+      errorMessage = null;
+    });
+
+    try {
+      final data = await apiService.getAttendance();
+
+      final rawAttendance = data['attendance'];
+      final records = _parseAttendance(rawAttendance);
+      final rawToday = data['today'];
+
+      if (!mounted) return;
+
+      setState(() {
+        attendance = records;
+        today = rawToday is Map
+            ? Map<String, dynamic>.from(rawToday)
+            : {};
+        monthLabel = data['month_label']?.toString() ?? '';
+        loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        errorMessage =
+            error.toString().replaceFirst('Exception: ', '');
+        loading = false;
+      });
+    }
+  }
+
+  List<dynamic> _parseAttendance(dynamic rawAttendance) {
+    if (rawAttendance is List) {
+      return rawAttendance;
+    }
+
+    if (rawAttendance is! Map) {
+      return [];
+    }
+
+    final nestedData = rawAttendance['data'];
+
+    if (nestedData is List) {
+      return nestedData;
+    }
+
+    return rawAttendance.entries.map((entry) {
+      final value = entry.value;
+
+      if (value is Map) {
+        return {
+          'date': entry.key.toString(),
+          ...Map<String, dynamic>.from(value),
+        };
+      }
+
+      return {
+        'date': entry.key.toString(),
+        'status': value.toString(),
+      };
+    }).toList();
+  }
+
+  Future<void> submitAttendance() async {
+    if (!_canSubmit) {
+      _showMessage(_todayMessage, Colors.orange);
+      return;
+    }
+
+    setState(() => submitting = true);
+
+    try {
+      final result = await apiService.submitAttendance(
+        status: 'P',
+      );
+
+      if (!mounted) return;
+
+      _showMessage(
+        result['message']?.toString() ??
+            'Attendance submitted successfully.',
+        Colors.green,
+      );
+
+      await loadAttendance();
+    } catch (error) {
+      if (!mounted) return;
+
+      _showMessage(
+        error.toString().replaceFirst('Exception: ', ''),
+        Colors.red,
+      );
+
+      await loadAttendance();
+    } finally {
+      if (mounted) {
+        setState(() => submitting = false);
+      }
+    }
+  }
+
+  // Friday is the weekly holiday.
+  bool get _isFriday {
+    return DateTime.now().weekday == DateTime.friday;
+  }
+
+  bool get _submitted {
+    return !_isFriday && today['submitted'] == true;
+  }
+
+  bool get _canSubmit {
+    if (_isFriday) {
+      return false;
+    }
+
+    return today['can_submit'] == true ||
+        today['can_resubmit'] == true;
+  }
+
+  String get _todayStatus {
+    final status = today['status']?.toString();
+
+    if (status == null || status.isEmpty || status == 'null') {
+      return 'Not submitted';
+    }
+
+    switch (status.toUpperCase()) {
+      case 'P':
+        return 'Present';
+      case 'A':
+        return 'Absent';
+      case 'L':
+        return 'Leave';
+      default:
+        return status;
+    }
+  }
+
+  String get _todayMessage {
+    if (_isFriday) {
+      return 'Friday is the weekly government holiday. Attendance is unavailable today.';
+    }
+
+    if (_submitted) {
+      final time = today['time']?.toString();
+
+      if (time != null &&
+          time.isNotEmpty &&
+          time != 'null') {
+        return 'Attendance already submitted at $time.';
+      }
+
+      return 'Attendance already submitted for today.';
+    }
+
+    if (today['can_submit'] == false &&
+        today['can_resubmit'] != true) {
+      return 'Attendance cannot be submitted today.';
+    }
+
+    return 'You can submit attendance now.';
+  }
+
+  String _status(dynamic item) {
+    if (item is! Map) return 'N/A';
+
+    return (item['status'] ??
+            item['attendance_status'] ??
+            item['state'] ??
+            'N/A')
+        .toString()
+        .trim();
+  }
+
+  String _date(dynamic item) {
+    if (item is! Map) return '';
+
+    return (item['date'] ??
+            item['attendance_date'] ??
+            item['day'] ??
+            '')
+        .toString();
+  }
+
+  int get presentCount {
+    return attendance.where((item) {
+      final status = _status(item).toUpperCase();
+      return status == 'P' || status == 'PRESENT';
+    }).length;
+  }
+
+  int get absentCount {
+    return attendance.where((item) {
+      final status = _status(item).toUpperCase();
+      return status == 'A' || status == 'ABSENT';
+    }).length;
+  }
+
+  int get leaveCount {
+    return attendance.where((item) {
+      final status = _status(item).toUpperCase();
+      return status == 'L' || status == 'LEAVE';
+    }).length;
+  }
+
+  void _showMessage(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xffF7F4F2),
+      appBar: AppBar(
+        elevation: 0,
+        title: const Text(
+          'Attendance',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        backgroundColor: const Color(0xff8B1E24),
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            onPressed: loading ? null : loadAttendance,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: loading
+          ? const Center(
+              child: CircularProgressIndicator(
+                color: Color(0xff8B1E24),
+              ),
+            )
+          : errorMessage != null
+              ? _errorView()
+              : RefreshIndicator(
+                  color: const Color(0xff8B1E24),
+                  onRefresh: loadAttendance,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(
+                      18,
+                      20,
+                      18,
+                      30,
+                    ),
+                    children: [
+                      _monthHeader(),
+                      const SizedBox(height: 18),
+                      _todayCard(),
+                      const SizedBox(height: 14),
+                      _statistics(),
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Attendance History',
+                        style: TextStyle(
+                          fontSize: 21,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      if (attendance.isEmpty)
+                        _emptyCard()
+                      else
+                        ...attendance.map(_attendanceTile),
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _monthHeader() {
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [
+            Color(0xff8B1E24),
+            Color(0xffB33A40),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xff8B1E24)
+                .withValues(alpha: .22),
+            blurRadius: 14,
+            offset: const Offset(0, 7),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: .18),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(
+              Icons.calendar_month_rounded,
+              color: Colors.white,
+              size: 34,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Monthly Attendance',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                monthLabel.isEmpty
+                    ? 'Current Month'
+                    : monthLabel,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 23,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _todayCard() {
+    final statusColor = _isFriday
+        ? const Color(0xff64748B)
+        : _submitted
+            ? const Color(0xff16803C)
+            : const Color(0xffC77700);
+
+    final statusBackground = _isFriday
+        ? const Color(0xffF1F5F9)
+        : _submitted
+            ? const Color(0xffEAF7EE)
+            : const Color(0xfffff5df);
+
+    final statusIcon = _isFriday
+        ? Icons.event_rounded
+        : _submitted
+            ? Icons.check_circle_rounded
+            : Icons.how_to_reg_rounded;
+
+    final statusText = _isFriday
+        ? 'Friday Holiday'
+        : _todayStatus;
+
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: statusBackground,
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: Icon(
+                    statusIcon,
+                    color: statusColor,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 11),
+                const Expanded(
+                  child: Text(
+                    'Today\'s Attendance',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                if (_isFriday)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: statusBackground,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      'OFF',
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 13,
+              ),
+              decoration: BoxDecoration(
+                color: statusBackground,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    statusIcon,
+                    color: statusColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      statusText,
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (!_isFriday &&
+                      today['time'] != null &&
+                      today['time'].toString() != 'null')
+                    Text(
+                      today['time'].toString(),
+                      style: const TextStyle(
+                        color: Colors.black54,
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _todayMessage,
+              style: const TextStyle(
+                color: Colors.black54,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 15),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: FilledButton(
+                onPressed:
+                    _isFriday ||
+                            submitting ||
+                            !_canSubmit
+                        ? null
+                        : submitAttendance,
+                style: FilledButton.styleFrom(
+                  backgroundColor:
+                      const Color(0xff8B1E24),
+                  disabledBackgroundColor:
+                      const Color(0xffD5D5D5),
+                  disabledForegroundColor:
+                      Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius:
+                        BorderRadius.circular(12),
+                  ),
+                ),
+                child: submitting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : Text(
+                        _isFriday
+                            ? 'Friday Holiday'
+                            : today['can_resubmit'] == true
+                                ? 'Update Attendance'
+                                : _submitted
+                                    ? 'Already Submitted'
+                                    : 'Submit Attendance',
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statistics() {
+    return Row(
+      children: [
+        Expanded(
+          child: _statCard(
+            'Present',
+            '$presentCount',
+            Icons.check_circle_rounded,
+            const Color(0xff16803C),
+            const Color(0xffE8F6ED),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _statCard(
+            'Absent',
+            '$absentCount',
+            Icons.cancel_rounded,
+            const Color(0xffC62828),
+            const Color(0xffFDECEC),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _statCard(
+            'Leave',
+            '$leaveCount',
+            Icons.event_busy_rounded,
+            const Color(0xffC77700),
+            const Color(0xffFFF5DF),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color,
+    Color backgroundColor,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 12,
+      ),
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: color.withValues(alpha: .14),
+        ),
+      ),
+      child: Column(
+        children: [
+          Icon(
+            icon,
+            color: color,
+            size: 22,
+          ),
+          const SizedBox(height: 5),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 21,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            title,
+            style: TextStyle(
+              color: color.withValues(alpha: .80),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _attendanceTile(dynamic item) {
+    final status = _status(item);
+    final date = _date(item);
+    final normalized = status.toUpperCase();
+
+    final isPresent =
+        normalized == 'P' || normalized == 'PRESENT';
+
+    final isLeave =
+        normalized == 'L' || normalized == 'LEAVE';
+
+    final color = isPresent
+        ? const Color(0xff16803C)
+        : isLeave
+            ? const Color(0xffC77700)
+            : const Color(0xffC62828);
+
+    final backgroundColor = isPresent
+        ? const Color(0xffF0FAF3)
+        : isLeave
+            ? const Color(0xfffff8e9)
+            : const Color(0xfffff1f1);
+
+    final label = isPresent
+        ? 'Present'
+        : isLeave
+            ? 'Leave'
+            : normalized == 'A'
+                ? 'Absent'
+                : status;
+
+    final icon = isPresent
+        ? Icons.check_circle_rounded
+        : isLeave
+            ? Icons.event_busy_rounded
+            : Icons.cancel_rounded;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 7),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 10,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: color.withValues(alpha: .12),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: backgroundColor,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              icon,
+              color: color,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  date.isEmpty
+                      ? 'Attendance record'
+                      : date,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  'Daily attendance',
+                  style: TextStyle(
+                    color: Colors.black45,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 9,
+              vertical: 5,
+            ),
+            decoration: BoxDecoration(
+              color: backgroundColor,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyCard() {
+    return const Card(
+      elevation: 0,
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Center(
+          child: Text(
+            'No attendance records found.',
+            style: TextStyle(
+              color: Colors.black54,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _errorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.error_outline_rounded,
+              color: Colors.red,
+              size: 52,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              errorMessage!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.red,
+              ),
+            ),
+            const SizedBox(height: 18),
+            FilledButton(
+              onPressed: loadAttendance,
+              style: FilledButton.styleFrom(
+                backgroundColor:
+                    const Color(0xff8B1E24),
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+**এখন Friday হলে:**
+
+* `Friday Holiday` দেখাবে
+* `OFF` badge দেখাবে
+* Attendance submit/update করা যাবে না
+* Button disabled থাকবে
+* Friday-র message দেখাবে
+* Friday হলেও history/statistics API data স্বাভাবিকভাবেই দেখাবে
+* Saturday–Thursday-তে আগের attendance submission behavior থাকবে।

@@ -1,0 +1,385 @@
+import 'package:dio/dio.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class ApiService {
+  static const String baseUrl = 'https://pibd.org/api';
+
+  static const String tokenKey = 'auth_token';
+  static const String rememberedEmailKey = 'remembered_email';
+  static const String sessionStartedKey = 'session_started_at';
+
+  final Dio _dio = Dio(
+    BaseOptions(
+      baseUrl: baseUrl,
+      connectTimeout: const Duration(seconds: 20),
+      receiveTimeout: const Duration(seconds: 30),
+      sendTimeout: const Duration(seconds: 20),
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    ),
+  );
+
+  final FlutterSecureStorage _storage =
+      const FlutterSecureStorage();
+
+  Future<Map<String, dynamic>> login({
+    required String email,
+    required String password,
+    bool rememberMe = false,
+  }) async {
+    try {
+      final response = await _dio.post(
+        '/auth/login',
+        data: {
+          'email': email,
+          'password': password,
+          'device_name': 'pibd-employee-app',
+        },
+      );
+
+      final data = _asMap(response.data);
+      final token = data['token']?.toString();
+
+      if (token == null || token.isEmpty) {
+        throw Exception('Login token was not received.');
+      }
+
+      await _storage.write(
+        key: tokenKey,
+        value: token,
+      );
+
+      await _saveLoginSession(
+        email: email,
+        rememberMe: rememberMe,
+      );
+
+      return data;
+    } on DioException catch (error) {
+      throw Exception(
+        _errorMessage(
+          error,
+          fallback:
+              'Login failed. Please check your internet connection.',
+        ),
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>> getDashboard() async {
+    try {
+      final response = await _authenticatedGet(
+        '/employee/dashboard',
+      );
+
+      return _asMap(response.data);
+    } on DioException catch (error) {
+      throw Exception(
+        _errorMessage(
+          error,
+          fallback: 'Dashboard could not be loaded.',
+        ),
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>> getAttendance({
+    int? month,
+    int? year,
+  }) async {
+    try {
+      final now = DateTime.now();
+
+      final response = await _authenticatedGet(
+        '/employee/attendance',
+        queryParameters: {
+          'month': month ?? now.month,
+          'year': year ?? now.year,
+        },
+      );
+
+      final data = _asMap(response.data);
+
+      if (data['success'] == false) {
+        throw Exception(
+          data['message']?.toString() ??
+              'Attendance could not be loaded.',
+        );
+      }
+
+      return data;
+    } on DioException catch (error) {
+      throw Exception(
+        _errorMessage(
+          error,
+          fallback: 'Attendance could not be loaded.',
+        ),
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>> submitAttendance({
+    String status = 'P',
+  }) async {
+    try {
+      final response = await _authenticatedPost(
+        '/employee/attendance',
+        data: {
+          'status': status,
+        },
+      );
+
+      return _asMap(response.data);
+    } on DioException catch (error) {
+      final responseData = error.response?.data;
+
+      if (error.response?.statusCode == 409 &&
+          responseData is Map) {
+        throw Exception(
+          responseData['message']?.toString() ??
+              'Attendance has already been submitted today.',
+        );
+      }
+
+      throw Exception(
+        _errorMessage(
+          error,
+          fallback: 'Attendance could not be submitted.',
+        ),
+      );
+    }
+  }
+
+  Future<String?> getRememberedEmail() async {
+    return _storage.read(
+      key: rememberedEmailKey,
+    );
+  }
+
+  Future<bool> hasValidSession() async {
+    final token = await _storage.read(
+      key: tokenKey,
+    );
+
+    final sessionStartedValue = await _storage.read(
+      key: sessionStartedKey,
+    );
+
+    if (token == null ||
+        token.isEmpty ||
+        sessionStartedValue == null ||
+        sessionStartedValue.isEmpty) {
+      return false;
+    }
+
+    final now = DateTime.now();
+
+    // Friday is the weekly holiday.
+    if (now.weekday == DateTime.friday) {
+      await clearLocalSession();
+      return false;
+    }
+
+    final sessionStarted = DateTime.tryParse(
+      sessionStartedValue,
+    );
+
+    if (sessionStarted == null) {
+      await clearLocalSession();
+      return false;
+    }
+
+    final sessionAge = now.difference(sessionStarted);
+
+    // Session remains valid for six days.
+    if (sessionAge.inDays >= 6) {
+      await clearLocalSession();
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<void> clearLocalSession() async {
+    await _storage.delete(key: tokenKey);
+    await _storage.delete(key: sessionStartedKey);
+  }
+
+  Future<void> logout() async {
+    try {
+      final token = await _storage.read(
+        key: tokenKey,
+      );
+
+      if (token != null && token.isNotEmpty) {
+        await _dio.post(
+          '/auth/logout',
+          options: Options(
+            headers: {
+              'Authorization': 'Bearer $token',
+            },
+          ),
+        );
+      }
+    } on DioException {
+      // Local session is cleared even if server is unavailable.
+    } finally {
+      await _storage.delete(key: tokenKey);
+      await _storage.delete(key: sessionStartedKey);
+    }
+  }
+
+  Future<void> _saveLoginSession({
+    required String email,
+    required bool rememberMe,
+  }) async {
+    if (rememberMe) {
+      await _storage.write(
+        key: rememberedEmailKey,
+        value: email,
+      );
+
+      await _storage.write(
+        key: sessionStartedKey,
+        value: DateTime.now().toIso8601String(),
+      );
+    } else {
+      await _storage.delete(
+        key: rememberedEmailKey,
+      );
+
+      await _storage.delete(
+        key: sessionStartedKey,
+      );
+    }
+  }
+
+  Future<Response<dynamic>> _authenticatedGet(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    final token = await _requiredToken();
+
+    try {
+      return await _dio.get(
+        path,
+        queryParameters: queryParameters,
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $token',
+          },
+        ),
+      );
+    } on DioException catch (error) {
+      await _clearTokenIfUnauthorized(error);
+      rethrow;
+    }
+  }
+
+  Future<Response<dynamic>> _authenticatedPost(
+    String path, {
+    required Map<String, dynamic> data,
+  }) async {
+    final token = await _requiredToken();
+
+    try {
+      return await _dio.post(
+        path,
+        data: data,
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $token',
+          },
+        ),
+      );
+    } on DioException catch (error) {
+      await _clearTokenIfUnauthorized(error);
+      rethrow;
+    }
+  }
+
+  Future<String> _requiredToken() async {
+    final token = await _storage.read(
+      key: tokenKey,
+    );
+
+    if (token == null || token.isEmpty) {
+      throw Exception(
+        'Your session has expired. Please log in again.',
+      );
+    }
+
+    return token;
+  }
+
+  Future<void> _clearTokenIfUnauthorized(
+    DioException error,
+  ) async {
+    if (error.response?.statusCode == 401) {
+      await clearLocalSession();
+    }
+  }
+
+  Map<String, dynamic> _asMap(dynamic value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+
+    throw Exception(
+      'Unexpected response format from the server.',
+    );
+  }
+
+  String _errorMessage(
+    DioException error, {
+    required String fallback,
+  }) {
+    final responseData = error.response?.data;
+
+    if (responseData is Map) {
+      final message = responseData['message']?.toString();
+
+      if (message != null && message.isNotEmpty) {
+        return message;
+      }
+
+      final errors = responseData['errors'];
+
+      if (errors is Map) {
+        final messages = <String>[];
+
+        for (final value in errors.values) {
+          if (value is List) {
+            messages.addAll(
+              value.map((item) => item.toString()),
+            );
+          } else {
+            messages.add(value.toString());
+          }
+        }
+
+        if (messages.isNotEmpty) {
+          return messages.join('\n');
+        }
+      }
+    }
+
+    if (error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout) {
+      return 'The server took too long to respond.';
+    }
+
+    if (error.type == DioExceptionType.connectionError) {
+      return 'Could not connect to the PIBD server.';
+    }
+
+    return fallback;
+  }
+}
